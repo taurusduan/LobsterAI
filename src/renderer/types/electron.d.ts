@@ -267,6 +267,7 @@ interface IElectronAPI {
     delete: (id: string) => Promise<{ success: boolean; servers?: McpServerConfigIPC[]; error?: string }>;
     setEnabled: (options: { id: string; enabled: boolean }) => Promise<{ success: boolean; servers?: McpServerConfigIPC[]; error?: string }>;
     fetchMarketplace: () => Promise<{ success: boolean; data?: McpMarketplaceData; error?: string }>;
+    refreshBridge: () => Promise<{ success: boolean; tools: number; error?: string }>;
   };
   api: {
     fetch: (options: {

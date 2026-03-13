@@ -1021,6 +1021,54 @@ const stopMcpBridge = async (): Promise<void> => {
   }
 };
 
+/**
+ * Refresh the MCP Bridge after server config changes:
+ * stop existing MCP servers → restart with new config → sync openclaw.json → restart gateway.
+ * Returns a summary for the renderer to display.
+ */
+let mcpBridgeRefreshPromise: Promise<{ tools: number; error?: string }> | null = null;
+
+const refreshMcpBridge = (): Promise<{ tools: number; error?: string }> => {
+  if (mcpBridgeRefreshPromise) {
+    return mcpBridgeRefreshPromise;
+  }
+  mcpBridgeRefreshPromise = (async () => {
+    try {
+      console.log('[McpBridge] refreshing after config change...');
+
+      // 1. Stop existing MCP servers (but keep HTTP callback server alive — port stays the same)
+      if (mcpServerManager) {
+        await mcpServerManager.stopServers();
+      }
+
+      // 2. Re-discover tools from the new set of enabled servers
+      const bridgeConfig = await startMcpBridge();
+      const toolCount = bridgeConfig?.tools.length ?? 0;
+      console.log(`[McpBridge] refresh: ${toolCount} tools discovered`);
+
+      // 3. Sync openclaw.json and restart gateway if running
+      const syncResult = await syncOpenClawConfig({
+        reason: 'mcp-server-changed',
+        restartGatewayIfRunning: true,
+      });
+      if (!syncResult.success) {
+        console.error('[McpBridge] refresh: config sync failed:', syncResult.error);
+        return { tools: toolCount, error: syncResult.error };
+      }
+
+      console.log(`[McpBridge] refresh complete: ${toolCount} tools, gateway restarted=${syncResult.changed}`);
+      return { tools: toolCount };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error('[McpBridge] refresh error:', msg);
+      return { tools: 0, error: msg };
+    }
+  })().finally(() => {
+    mcpBridgeRefreshPromise = null;
+  });
+  return mcpBridgeRefreshPromise;
+};
+
 const getIMGatewayManager = () => {
   if (!imGatewayManager) {
     const sqliteStore = getStore();
@@ -1582,7 +1630,7 @@ if (!gotTheLock) {
     }
   });
 
-  ipcMain.handle('mcp:create', (_event, data: {
+  ipcMain.handle('mcp:create', async (_event, data: {
     name: string;
     description: string;
     transportType: string;
@@ -1595,13 +1643,15 @@ if (!gotTheLock) {
     try {
       getMcpStore().createServer(data as any);
       const servers = getMcpStore().listServers();
+      // Trigger async MCP bridge refresh (don't await — let UI show DB result immediately)
+      refreshMcpBridge().catch(err => console.error('[McpBridge] background refresh error:', err));
       return { success: true, servers };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to create MCP server' };
     }
   });
 
-  ipcMain.handle('mcp:update', (_event, id: string, data: {
+  ipcMain.handle('mcp:update', async (_event, id: string, data: {
     name?: string;
     description?: string;
     transportType?: string;
@@ -1614,26 +1664,29 @@ if (!gotTheLock) {
     try {
       getMcpStore().updateServer(id, data as any);
       const servers = getMcpStore().listServers();
+      refreshMcpBridge().catch(err => console.error('[McpBridge] background refresh error:', err));
       return { success: true, servers };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to update MCP server' };
     }
   });
 
-  ipcMain.handle('mcp:delete', (_event, id: string) => {
+  ipcMain.handle('mcp:delete', async (_event, id: string) => {
     try {
       getMcpStore().deleteServer(id);
       const servers = getMcpStore().listServers();
+      refreshMcpBridge().catch(err => console.error('[McpBridge] background refresh error:', err));
       return { success: true, servers };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to delete MCP server' };
     }
   });
 
-  ipcMain.handle('mcp:setEnabled', (_event, options: { id: string; enabled: boolean }) => {
+  ipcMain.handle('mcp:setEnabled', async (_event, options: { id: string; enabled: boolean }) => {
     try {
       getMcpStore().setEnabled(options.id, options.enabled);
       const servers = getMcpStore().listServers();
+      refreshMcpBridge().catch(err => console.error('[McpBridge] background refresh error:', err));
       return { success: true, servers };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to update MCP server' };
@@ -1671,6 +1724,16 @@ if (!gotTheLock) {
       return { success: true, data: marketplace };
     } catch (error) {
       return { success: false, error: error instanceof Error ? error.message : 'Failed to fetch marketplace' };
+    }
+  });
+
+  // Explicit bridge refresh — renderer can await this for loading state
+  ipcMain.handle('mcp:refreshBridge', async () => {
+    try {
+      const result = await refreshMcpBridge();
+      return { success: true, tools: result.tools, error: result.error };
+    } catch (error) {
+      return { success: false, tools: 0, error: error instanceof Error ? error.message : 'Failed to refresh MCP bridge' };
     }
   });
 
