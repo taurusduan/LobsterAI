@@ -2651,71 +2651,59 @@ if (!gotTheLock) {
     }
   });
 
+  // Debounce + serialization for im:config:set → syncOpenClawConfig.
+  // Rapid sequential config changes (e.g. toggling 4 platforms) are coalesced
+  // into a single gateway restart instead of N restarts.
+  // The running/pending flags prevent concurrent sync operations from racing:
+  // if a sync is in progress when new changes arrive, they are queued and
+  // a follow-up sync runs after the current one completes.
+  let imConfigSyncTimer: ReturnType<typeof setTimeout> | null = null;
+  let imConfigSyncRunning = false;
+  let imConfigSyncPending = false;
+  const IM_CONFIG_SYNC_DEBOUNCE_MS = 600;
+
+  const doImConfigSync = async () => {
+    imConfigSyncRunning = true;
+    try {
+      await syncOpenClawConfig({
+        reason: 'im-config-change',
+        restartGatewayIfRunning: true,
+      });
+    } catch (error) {
+      console.error('[IM] Debounced config sync failed:', error);
+    } finally {
+      imConfigSyncRunning = false;
+      if (imConfigSyncPending) {
+        imConfigSyncPending = false;
+        scheduleImConfigSync();
+      }
+    }
+  };
+
+  const scheduleImConfigSync = () => {
+    if (imConfigSyncRunning) {
+      // A sync is already in progress; mark pending so it re-runs after completion.
+      imConfigSyncPending = true;
+      return;
+    }
+    if (imConfigSyncTimer) clearTimeout(imConfigSyncTimer);
+    imConfigSyncTimer = setTimeout(() => {
+      imConfigSyncTimer = null;
+      void doImConfigSync();
+    }, IM_CONFIG_SYNC_DEBOUNCE_MS);
+  };
+
   ipcMain.handle('im:config:set', async (_event, config: Partial<IMGatewayConfig>) => {
     try {
       getIMGatewayManager().setConfig(config);
 
-      // Sync Telegram config to OpenClaw runtime if changed
-      if (config.telegram) {
-        const engineManager = getOpenClawEngineManager();
-        if (engineManager.getStatus().phase === 'running') {
-          await syncOpenClawConfig({
-            reason: 'telegram-openclaw-config-change',
-            restartGatewayIfRunning: true,
-          });
-        }
-      }
-
-      // Sync Discord config to OpenClaw runtime if changed
-      if (config.discord) {
-        const engineManager = getOpenClawEngineManager();
-        if (engineManager.getStatus().phase === 'running') {
-          await syncOpenClawConfig({
-            reason: 'discord-openclaw-config-change',
-            restartGatewayIfRunning: true,
-          });
-        }
-      }
-
-      // Re-sync OpenClaw config so dingtalk-connector picks up new credentials
-      if (config.dingtalk) {
-        const engineManager = getOpenClawEngineManager();
-        if (engineManager.getStatus().phase === 'running') {
-          await syncOpenClawConfig({
-            reason: 'dingtalk-openclaw-config-change',
-            restartGatewayIfRunning: true,
-          });
-        }
-      }
-      // Re-sync OpenClaw config so feishu-openclaw-plugin picks up new credentials
-      if (config.feishu) {
-        const engineManager = getOpenClawEngineManager();
-        if (engineManager.getStatus().phase === 'running') {
-          await syncOpenClawConfig({
-            reason: 'feishu-openclaw-config-change',
-            restartGatewayIfRunning: true,
-          });
-        }
-      }
-      // Re-sync OpenClaw config so qqbot plugin picks up new credentials
-      if (config.qq) {
-        const engineManager = getOpenClawEngineManager();
-        if (engineManager.getStatus().phase === 'running') {
-          await syncOpenClawConfig({
-            reason: 'im-qq-openclaw-config-change',
-            restartGatewayIfRunning: true,
-          });
-        }
-      }
-      // Re-sync OpenClaw config so wecom-openclaw-plugin picks up new credentials
-      if (config.wecom) {
-        const wecomEngineManager = getOpenClawEngineManager();
-        if (wecomEngineManager.getStatus().phase === 'running') {
-          await syncOpenClawConfig({
-            reason: 'im-wecom-config-change',
-            restartGatewayIfRunning: true,
-          });
-        }
+      // Sync OpenClaw config once for all platform changes (instead of per-platform).
+      // setConfig() already persists to DB synchronously, so syncOpenClawConfig just
+      // needs to regenerate openclaw.json and restart the gateway once.
+      const hasOpenClawChange = config.telegram || config.discord || config.dingtalk
+        || config.feishu || config.qq || config.wecom;
+      if (hasOpenClawChange && getOpenClawEngineManager().getStatus().phase === 'running') {
+        scheduleImConfigSync();
       }
       return { success: true };
     } catch (error) {
@@ -3226,9 +3214,31 @@ if (!gotTheLock) {
     return false;
   });
 
+  // 企微 SDK 授权弹窗白名单域名
+  const WECOM_AUTH_HOSTNAMES = new Set([
+    'work.weixin.qq.com',
+    'open.work.weixin.qq.com',
+    'wwcdn.weixin.qq.com',
+  ]);
+
+  const isWecomAuthUrl = (url: string): boolean => {
+    try {
+      const hostname = new URL(url).hostname;
+      return WECOM_AUTH_HOSTNAMES.has(hostname);
+    } catch {
+      return false;
+    }
+  };
+
   // 设置 Content Security Policy
   const setContentSecurityPolicy = () => {
     session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+      // 跳过企微授权页面，让其使用自身的 CSP（否则外部脚本被阻止导致空白页）
+      if (isWecomAuthUrl(details.url)) {
+        callback({ responseHeaders: details.responseHeaders });
+        return;
+      }
+
       const devPort = process.env.ELECTRON_START_URL?.match(/:(\d+)/)?.[1] || '5175';
       const cspDirectives = [
         "default-src 'self'",
@@ -3311,6 +3321,38 @@ if (!gotTheLock) {
 
     // 禁用窗口菜单
     mainWindow.setMenu(null);
+
+    // 处理 window.open 请求（企微 SDK 授权弹窗等）
+    mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+      if (isWecomAuthUrl(url)) {
+        return {
+          action: 'allow',
+          overrideBrowserWindowOptions: {
+            width: 950,
+            height: 640,
+            title: '企业微信授权',
+            autoHideMenuBar: true,
+            webPreferences: {
+              nodeIntegration: false,
+              contextIsolation: true,
+              sandbox: true,
+            },
+          },
+        };
+      }
+      shell.openExternal(url);
+      return { action: 'deny' };
+    });
+
+    // 监听子窗口创建事件（企微授权弹窗安全限制）
+    mainWindow.webContents.on('did-create-window', (childWindow) => {
+      // 限制子窗口只能导航到企微域名，防止被劫持到其他站点
+      childWindow.webContents.on('will-navigate', (event, navUrl) => {
+        if (!isWecomAuthUrl(navUrl)) {
+          event.preventDefault();
+        }
+      });
+    });
 
     // 设置窗口的最小尺寸
     mainWindow.setMinimumSize(800, 600);

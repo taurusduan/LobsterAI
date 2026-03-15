@@ -13,6 +13,7 @@ import { setDingTalkConfig, setFeishuConfig, setTelegramOpenClawConfig, setQQCon
 import { i18nService } from '../../services/i18n';
 import type { IMPlatform, IMConnectivityCheck, IMConnectivityTestResult, IMGatewayConfig, TelegramOpenClawConfig, DiscordOpenClawConfig, FeishuOpenClawConfig, DingTalkOpenClawConfig, QQOpenClawConfig, WecomOpenClawConfig } from '../../types/im';
 import { getVisibleIMPlatforms } from '../../utils/regionFilter';
+import WecomAIBotSDK from '@wecom/wecom-aibot-sdk';
 
 // Platform metadata - logos only, labels use i18n
 const platformLogos: Record<IMPlatform, string> = {
@@ -25,6 +26,48 @@ const platformLogos: Record<IMPlatform, string> = {
   xiaomifeng: 'xiaomifeng.png',
   wecom: 'wecom.png',
 };
+
+// IM platform setup guide URLs
+const IM_GUIDE_URLS: Partial<Record<IMPlatform, string>> = {
+  dingtalk: 'https://lobsterai.youdao.com/#/docs/lobsterai_im_bot_config_guide/%E9%92%89%E9%92%89-im-%E6%9C%BA%E5%99%A8%E4%BA%BA%E9%85%8D%E7%BD%AE',
+  feishu: 'https://lobsterai.youdao.com/#/docs/lobsterai_im_bot_config_guide/%E9%A3%9E%E4%B9%A6-im-%E6%9C%BA%E5%99%A8%E4%BA%BA%E9%85%8D%E7%BD%AE',
+  wecom: 'https://lobsterai.youdao.com/#/docs/lobsterai_im_bot_config_guide/%E4%BC%81%E4%B8%9A%E5%BE%AE%E4%BF%A1%E6%9C%BA%E5%99%A8%E4%BA%BA%E9%85%8D%E7%BD%AE',
+  qq: 'https://lobsterai.youdao.com/#/docs/lobsterai_im_bot_config_guide/qqqq-bot',
+  telegram: 'https://lobsterai.youdao.com/#/en/docs/lobsterai_im_bot_config_guide/telegram-bot-configuration',
+  discord: 'https://lobsterai.youdao.com/#/en/docs/lobsterai_im_bot_config_guide/discord-bot-configuration',
+};
+
+// Reusable guide card component for platform setup instructions
+const PlatformGuide: React.FC<{
+  title?: string;
+  steps: string[];
+  guideUrl?: string;
+  guideLabel?: string;
+}> = ({ title, steps, guideUrl, guideLabel }) => (
+  <div className="mb-3 p-3 rounded-lg bg-blue-50/50 dark:bg-blue-900/10 border border-blue-200 dark:border-blue-800/30">
+    {title && (
+      <p className="text-xs text-blue-700 dark:text-blue-300 leading-relaxed mb-1.5">{title}</p>
+    )}
+    <ol className="text-xs text-blue-500/70 dark:text-blue-400/60 space-y-1 list-decimal list-inside">
+      {steps.map((step, i) => (
+        <li key={i}>{step}</li>
+      ))}
+    </ol>
+    {guideUrl && (
+      <button
+        type="button"
+        onClick={() => {
+          window.electron.shell.openExternal(guideUrl).catch((err: unknown) => {
+            console.error('[IM] Failed to open guide URL:', err);
+          });
+        }}
+        className="mt-1.5 ml-[1.5em] text-xs text-claude-accent dark:text-claude-accentLight hover:text-claude-accentHover dark:hover:text-blue-200 underline underline-offset-2 transition-colors"
+      >
+        {guideLabel || i18nService.t('imViewGuide')}
+      </button>
+    )}
+  </div>
+);
 
 const verdictColorClass: Record<IMConnectivityTestResult['verdict'], string> = {
   pass: 'bg-green-500/15 text-green-600 dark:text-green-400',
@@ -68,7 +111,10 @@ const IMSettings: React.FC = () => {
   const [togglingPlatform, setTogglingPlatform] = useState<IMPlatform | null>(null);
   // Track visibility of password fields (eye toggle)
   const [showSecrets, setShowSecrets] = useState<Record<string, boolean>>({});
-
+  // WeCom quick setup state
+  const [wecomQuickSetupStatus, setWecomQuickSetupStatus] = useState<'idle' | 'pending' | 'success' | 'error'>('idle');
+  const [wecomQuickSetupError, setWecomQuickSetupError] = useState<string>('');
+  const isMountedRef = useRef(true);
   // Track the last-persisted NIM credentials so we can detect real changes on save
   const savedNimConfigRef = useRef<{ appKey: string; account: string; token: string }>({
     appKey: config.nim.appKey,
@@ -83,6 +129,20 @@ const IMSettings: React.FC = () => {
     });
     return unsubscribe;
   }, []);
+
+  // Track component mounted state for async operations
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => { isMountedRef.current = false; };
+  }, []);
+
+  // Reset wecom quick setup state when switching away from wecom
+  useEffect(() => {
+    if (activePlatform !== 'wecom') {
+      setWecomQuickSetupStatus('idle');
+      setWecomQuickSetupError('');
+    }
+  }, [activePlatform]);
 
   // Reset password visibility when switching platforms
   useEffect(() => {
@@ -222,6 +282,44 @@ const IMSettings: React.FC = () => {
     await imService.updateConfig({ wecom: configToSave });
   };
 
+  const handleWecomQuickSetup = async () => {
+    setWecomQuickSetupStatus('pending');
+    setWecomQuickSetupError('');
+    try {
+      const bot = await WecomAIBotSDK.openBotInfoAuthWindow({
+        source: 'lobster-ai',
+      });
+      if (!isMountedRef.current) return;
+
+      // Save credentials + enable in one atomic operation.
+      // im:config:set handler in main process already calls
+      // syncOpenClawConfig({ restartGatewayIfRunning: true }) when wecom config changes,
+      // so we do NOT call stopGateway/startGateway here to avoid redundant gateway restarts.
+      const fullConfig = { ...wecomOpenClawConfig, botId: bot.botid, secret: bot.secret, enabled: true };
+      dispatch(setWecomConfig({ botId: bot.botid, secret: bot.secret, enabled: true }));
+      dispatch(clearError());
+      await imService.updateConfig({ wecom: fullConfig });
+      if (!isMountedRef.current) return;
+      // Refresh status so the UI reflects the new connected state immediately.
+      // OpenClaw channels derive `connected` from config, but updateConfig only
+      // reloads config — status needs a separate refresh.
+      await imService.loadStatus();
+      if (!isMountedRef.current) return;
+      setWecomQuickSetupStatus('success');
+    } catch (error: unknown) {
+      if (!isMountedRef.current) return;
+      // Roll back optimistic Redux dispatch so UI matches persisted state
+      dispatch(setWecomConfig({
+        botId: wecomOpenClawConfig.botId,
+        secret: wecomOpenClawConfig.secret,
+        enabled: wecomOpenClawConfig.enabled,
+      }));
+      setWecomQuickSetupStatus('error');
+      const err = error as { message?: string; code?: string };
+      setWecomQuickSetupError(err.message || err.code || 'Unknown error');
+    }
+  };
+
   // Save config on blur — also auto-triggers NIM connectivity test when
   // the NIM toggle is ON and credential fields have changed.
   const handleSaveConfig = async () => {
@@ -335,82 +433,64 @@ const IMSettings: React.FC = () => {
     setTogglingPlatform(platform);
 
     try {
-      // Telegram has a separate config path
+      // All OpenClaw platforms: im:config:set handler already calls
+      // syncOpenClawConfig({ restartGatewayIfRunning: true }), so no startGateway/stopGateway needed.
+      // Only updateConfig + loadStatus is required.
       if (platform === 'telegram') {
         const newEnabled = !tgOpenClawConfig.enabled;
         dispatch(setTelegramOpenClawConfig({ enabled: newEnabled }));
+        if (newEnabled) dispatch(clearError());
         await imService.updateConfig({ telegram: { ...tgOpenClawConfig, enabled: newEnabled } });
-
-        if (newEnabled) {
-          dispatch(clearError());
-          const success = await imService.startGateway(platform);
-          if (!success) {
-            dispatch(setTelegramOpenClawConfig({ enabled: false }));
-            await imService.updateConfig({ telegram: { ...tgOpenClawConfig, enabled: false } });
-          }
-        } else {
-          await imService.stopGateway(platform);
-        }
+        await imService.loadStatus();
         return;
       }
 
-      // Feishu has a separate config path (OpenClaw mode)
+      if (platform === 'dingtalk') {
+        const newEnabled = !dtOpenClawConfig.enabled;
+        dispatch(setDingTalkConfig({ enabled: newEnabled }));
+        if (newEnabled) dispatch(clearError());
+        await imService.updateConfig({ dingtalk: { ...dtOpenClawConfig, enabled: newEnabled } });
+        await imService.loadStatus();
+        return;
+      }
+
       if (platform === 'feishu') {
         const newEnabled = !fsOpenClawConfig.enabled;
         dispatch(setFeishuConfig({ enabled: newEnabled }));
+        if (newEnabled) dispatch(clearError());
         await imService.updateConfig({ feishu: { ...fsOpenClawConfig, enabled: newEnabled } });
-
-        if (newEnabled) {
-          dispatch(clearError());
-          const success = await imService.startGateway(platform);
-          if (!success) {
-            dispatch(setFeishuConfig({ enabled: false }));
-            await imService.updateConfig({ feishu: { ...fsOpenClawConfig, enabled: false } });
-          }
-        } else {
-          await imService.stopGateway(platform);
-        }
+        await imService.loadStatus();
         return;
       }
 
-      // QQ has a separate config path (OpenClaw mode)
+      if (platform === 'discord') {
+        const newEnabled = !dcOpenClawConfig.enabled;
+        dispatch(setDiscordConfig({ enabled: newEnabled }));
+        if (newEnabled) dispatch(clearError());
+        await imService.updateConfig({ discord: { ...dcOpenClawConfig, enabled: newEnabled } });
+        await imService.loadStatus();
+        return;
+      }
+
       if (platform === 'qq') {
         const newEnabled = !qqOpenClawConfig.enabled;
         dispatch(setQQConfig({ enabled: newEnabled }));
+        if (newEnabled) dispatch(clearError());
         await imService.updateConfig({ qq: { ...qqOpenClawConfig, enabled: newEnabled } });
-
-        if (newEnabled) {
-          dispatch(clearError());
-          const success = await imService.startGateway(platform);
-          if (!success) {
-            dispatch(setQQConfig({ enabled: false }));
-            await imService.updateConfig({ qq: { ...qqOpenClawConfig, enabled: false } });
-          }
-        } else {
-          await imService.stopGateway(platform);
-        }
+        await imService.loadStatus();
         return;
       }
 
-      // WeCom has a separate config path (OpenClaw mode)
       if (platform === 'wecom') {
         const newEnabled = !wecomOpenClawConfig.enabled;
         dispatch(setWecomConfig({ enabled: newEnabled }));
+        if (newEnabled) dispatch(clearError());
         await imService.updateConfig({ wecom: { ...wecomOpenClawConfig, enabled: newEnabled } });
-
-        if (newEnabled) {
-          dispatch(clearError());
-          const success = await imService.startGateway(platform);
-          if (!success) {
-            dispatch(setWecomConfig({ enabled: false }));
-            await imService.updateConfig({ wecom: { ...wecomOpenClawConfig, enabled: false } });
-          }
-        } else {
-          await imService.stopGateway(platform);
-        }
+        await imService.loadStatus();
         return;
       }
 
+      // Non-OpenClaw platforms (nim, xiaomifeng): use startGateway/stopGateway
       const isEnabled = config[platform].enabled;
       const newEnabled = !isEnabled;
 
@@ -523,36 +603,61 @@ const IMSettings: React.FC = () => {
     // For Telegram, persist telegram config and test
     if (platform === 'telegram') {
       await imService.updateConfig({ telegram: tgOpenClawConfig });
-      await runConnectivityTest(platform, {
+      const result = await runConnectivityTest(platform, {
         telegram: tgOpenClawConfig,
       } as Partial<IMGatewayConfig>);
+      // Auto-enable: if OFF and auth_check passed, turn on automatically
+      if (!tgOpenClawConfig.enabled && result) {
+        const authCheck = result.checks.find((c) => c.code === 'auth_check');
+        if (authCheck && authCheck.level === 'pass') {
+          toggleGateway(platform);
+        }
+      }
       return;
     }
 
     // For QQ, persist qq config and test (OpenClaw mode)
     if (platform === 'qq') {
       await imService.updateConfig({ qq: qqOpenClawConfig });
-      await runConnectivityTest(platform, {
+      const result = await runConnectivityTest(platform, {
         qq: qqOpenClawConfig,
       } as Partial<IMGatewayConfig>);
+      if (!qqOpenClawConfig.enabled && result) {
+        const authCheck = result.checks.find((c) => c.code === 'auth_check');
+        if (authCheck && authCheck.level === 'pass') {
+          toggleGateway(platform);
+        }
+      }
       return;
     }
 
     // For WeCom, persist wecom config and test (OpenClaw mode)
     if (platform === 'wecom') {
       await imService.updateConfig({ wecom: wecomOpenClawConfig });
-      await runConnectivityTest(platform, {
+      const result = await runConnectivityTest(platform, {
         wecom: wecomOpenClawConfig,
       } as Partial<IMGatewayConfig>);
+      if (!wecomOpenClawConfig.enabled && result) {
+        const authCheck = result.checks.find((c) => c.code === 'auth_check');
+        if (authCheck && authCheck.level === 'pass') {
+          toggleGateway(platform);
+        }
+      }
       return;
     }
 
     // For Feishu, persist feishu config and test (OpenClaw mode)
     if (platform === 'feishu') {
       await imService.updateConfig({ feishu: fsOpenClawConfig });
-      await runConnectivityTest(platform, {
+      const result = await runConnectivityTest(platform, {
         feishu: fsOpenClawConfig,
       } as Partial<IMGatewayConfig>);
+      if (!fsOpenClawConfig.enabled && result) {
+        const authCheck = result.checks.find((c) => c.code === 'auth_check');
+        if (authCheck && authCheck.level === 'pass') {
+          toggleGateway(platform);
+        }
+      }
       return;
     }
 
@@ -568,10 +673,13 @@ const IMSettings: React.FC = () => {
     // (stop main → probe with temp instance → restart main) under a mutex,
     // so doing stop/start here would cause a race condition and potential crash.
     if (isEnabled && platform !== 'nim') {
-      // Gateway is ON: restart it to pick up the latest credentials, then run the
-      // gateway_running check (which also calls runAuthProbe internally via testGateway).
-      await imService.stopGateway(platform);
-      await imService.startGateway(platform);
+      // For non-OpenClaw platforms (xiaomifeng), restart gateway to pick up latest credentials.
+      // OpenClaw platforms (dingtalk, discord, etc.) are already restarted by im:config:set handler
+      // via syncOpenClawConfig({ restartGatewayIfRunning: true }), so stop/start is redundant.
+      if (platform === 'xiaomifeng') {
+        await imService.stopGateway(platform);
+        await imService.startGateway(platform);
+      }
     }
     // When the gateway is OFF we skip stop/start entirely.
     // The main process testGateway → runAuthProbe will spawn an isolated
@@ -793,6 +901,15 @@ const IMSettings: React.FC = () => {
         {/* DingTalk Settings */}
         {activePlatform === 'dingtalk' && (
           <div className="space-y-3">
+            <PlatformGuide
+              steps={[
+                i18nService.t('imDingtalkGuideStep1'),
+                i18nService.t('imDingtalkGuideStep2'),
+                i18nService.t('imDingtalkGuideStep3'),
+                i18nService.t('imDingtalkGuideStep4'),
+              ]}
+              guideUrl={IM_GUIDE_URLS.dingtalk}
+            />
             {/* Client ID */}
             <div className="space-y-1.5">
               <label className="block text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
@@ -1027,6 +1144,13 @@ const IMSettings: React.FC = () => {
         {/* Feishu Settings */}
         {activePlatform === 'feishu' && (
           <div className="space-y-3">
+            <PlatformGuide
+              steps={[
+                i18nService.t('imFeishuGuideStep1'),
+                i18nService.t('imFeishuGuideStep2'),
+              ]}
+              guideUrl={IM_GUIDE_URLS.feishu}
+            />
             {/* App ID */}
             <div className="space-y-1.5">
               <label className="block text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
@@ -1364,6 +1488,15 @@ const IMSettings: React.FC = () => {
         {/* QQ Settings */}
         {activePlatform === 'qq' && (
           <div className="space-y-3">
+            <PlatformGuide
+              steps={[
+                i18nService.t('imQQGuideStep1'),
+                i18nService.t('imQQGuideStep2'),
+                i18nService.t('imQQGuideStep3'),
+                i18nService.t('imQQGuideStep4'),
+              ]}
+              guideUrl={IM_GUIDE_URLS.qq}
+            />
             {/* AppID */}
             <div className="space-y-1.5">
               <label className="block text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
@@ -1622,6 +1755,15 @@ const IMSettings: React.FC = () => {
         {/* Telegram Settings */}
         {activePlatform === 'telegram' && (
           <div className="space-y-3">
+            <PlatformGuide
+              steps={[
+                i18nService.t('imTelegramGuideStep1'),
+                i18nService.t('imTelegramGuideStep2'),
+                i18nService.t('imTelegramGuideStep3'),
+                i18nService.t('imTelegramGuideStep4'),
+              ]}
+              guideUrl={IM_GUIDE_URLS.telegram}
+            />
             {/* Bot Token */}
             <div className="space-y-1.5">
               <label className="block text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
@@ -1939,6 +2081,17 @@ const IMSettings: React.FC = () => {
         {/* Discord Settings */}
         {activePlatform === 'discord' && (
           <div className="space-y-3">
+            <PlatformGuide
+              steps={[
+                i18nService.t('imDiscordGuideStep1'),
+                i18nService.t('imDiscordGuideStep2'),
+                i18nService.t('imDiscordGuideStep3'),
+                i18nService.t('imDiscordGuideStep4'),
+                i18nService.t('imDiscordGuideStep5'),
+                i18nService.t('imDiscordGuideStep6'),
+              ]}
+              guideUrl={IM_GUIDE_URLS.discord}
+            />
             {/* Bot Token */}
             <div className="space-y-1.5">
               <label className="block text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
@@ -2261,17 +2414,15 @@ const IMSettings: React.FC = () => {
         {activePlatform === 'nim' && (
           <div className="space-y-3">
             {/* How to get NIM credentials */}
-            <div className="mb-3 p-3 rounded-lg bg-blue-50/50 dark:bg-blue-900/10 border border-blue-200 dark:border-blue-800/30">
-              <p className="text-xs text-blue-700 dark:text-blue-300 leading-relaxed">
-                {i18nService.t('nimCredentialsGuide') || '如何获取云信凭证：'}
-              </p>
-              <ol className="mt-2 text-xs text-blue-600 dark:text-blue-400 space-y-1 list-decimal list-inside">
-                <li>{i18nService.t('nimGuideStep1') || '登录网易云信控制台（yunxin.163.com）'}</li>
-                <li>{i18nService.t('nimGuideStep2') || '创建或选择应用，获取 App Key'}</li>
-                <li>{i18nService.t('nimGuideStep3') || '在"账号数-子功能配置"中创建 IM 账号（accid）'}</li>
-                <li>{i18nService.t('nimGuideStep4') || '为该账号生成 Token（密码）- 建议长期有效'}</li>
-              </ol>
-            </div>
+            <PlatformGuide
+              title={i18nService.t('nimCredentialsGuide')}
+              steps={[
+                i18nService.t('nimGuideStep1'),
+                i18nService.t('nimGuideStep2'),
+                i18nService.t('nimGuideStep3'),
+                i18nService.t('nimGuideStep4'),
+              ]}
+            />
 
             {/* App Key */}
             <div className="space-y-1.5">
@@ -2612,6 +2763,53 @@ const IMSettings: React.FC = () => {
         {/* WeCom (企业微信) Settings */}
         {activePlatform === 'wecom' && (
           <div className="space-y-3">
+            {/* Scan QR code section */}
+            <div className="rounded-lg border border-dashed dark:border-claude-darkBorder/60 border-claude-border/60 p-4 text-center space-y-2">
+              <button
+                type="button"
+                disabled={wecomQuickSetupStatus === 'pending'}
+                onClick={handleWecomQuickSetup}
+                className="px-4 py-2.5 rounded-lg text-sm font-medium bg-claude-accent text-white hover:bg-claude-accent/90 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                {wecomQuickSetupStatus === 'pending'
+                  ? i18nService.t('imWecomQuickSetupPending')
+                  : i18nService.t('imWecomScanBtn')}
+              </button>
+              <p className="text-xs text-claude-textSecondary dark:text-claude-darkTextSecondary">
+                {i18nService.t('imWecomScanHint')}
+              </p>
+              {wecomQuickSetupStatus === 'success' && (
+                <div className="flex items-center justify-center gap-1.5 text-xs text-green-600 dark:text-green-400 bg-green-500/10 px-3 py-2 rounded-lg">
+                  <CheckCircleIcon className="h-4 w-4 flex-shrink-0" />
+                  {i18nService.t('imWecomQuickSetupSuccess')}
+                </div>
+              )}
+              {wecomQuickSetupStatus === 'error' && (
+                <div className="flex items-center justify-center gap-1.5 text-xs text-red-500 bg-red-500/10 px-3 py-2 rounded-lg">
+                  <XCircleIcon className="h-4 w-4 flex-shrink-0" />
+                  {i18nService.t('imWecomQuickSetupError')}: {wecomQuickSetupError}
+                </div>
+              )}
+            </div>
+
+            {/* Divider with "or manually enter" */}
+            <div className="relative flex items-center">
+              <div className="flex-1 border-t dark:border-claude-darkBorder/40 border-claude-border/40" />
+              <span className="px-3 text-xs text-claude-textSecondary dark:text-claude-darkTextSecondary whitespace-nowrap">
+                {i18nService.t('imWecomOrManual')}
+              </span>
+              <div className="flex-1 border-t dark:border-claude-darkBorder/40 border-claude-border/40" />
+            </div>
+
+            {/* Manual input section */}
+            <PlatformGuide
+              steps={[
+                i18nService.t('imWecomGuideStep1'),
+                i18nService.t('imWecomGuideStep2'),
+                i18nService.t('imWecomGuideStep3'),
+              ]}
+              guideUrl={IM_GUIDE_URLS.wecom}
+            />
             {/* Bot ID */}
             <div className="space-y-1.5">
               <label className="block text-xs font-medium dark:text-claude-darkTextSecondary text-claude-textSecondary">
@@ -2821,6 +3019,7 @@ const IMSettings: React.FC = () => {
               </div>
             </details>
 
+            {/* Connectivity test */}
             <div className="pt-1">
               {renderConnectivityTestButton('wecom')}
             </div>

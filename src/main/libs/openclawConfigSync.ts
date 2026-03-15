@@ -200,7 +200,19 @@ export class OpenClawConfigSync {
             plugins: {
               entries: {
                 ...Object.fromEntries(
-                  preinstalledPluginIds.map((id) => [id, { enabled: true }]),
+                  preinstalledPluginIds.map((id) => {
+                    // Sync plugin enabled state with the corresponding channel config.
+                    // When a channel is disabled in the UI, its plugin must also be
+                    // disabled so OpenClaw doesn't load it at all.
+                    const pluginEnabled = (() => {
+                      if (id === 'dingtalk-connector') return !!(dingTalkConfig?.enabled && dingTalkConfig.clientId);
+                      if (id === 'feishu-openclaw-plugin') return !!(feishuConfig?.enabled && feishuConfig.appId);
+                      if (id === 'qqbot') return !!(qqConfig?.enabled && qqConfig.appId);
+                      if (id === 'wecom-openclaw-plugin') return !!(wecomConfig?.enabled && wecomConfig.botId);
+                      return true; // other plugins stay enabled
+                    })();
+                    return [id, { enabled: pluginEnabled }];
+                  }),
                 ),
                 // Disable the built-in feishu plugin when the official one is preinstalled
                 ...(preinstalledPluginIds.includes('feishu-openclaw-plugin')
@@ -272,9 +284,8 @@ export class OpenClawConfigSync {
         }
       }
       managedConfig.channels = { ...(managedConfig.channels as Record<string, unknown> || {}), telegram: telegramChannel };
-    } else if (tgConfig) {
-      managedConfig.channels = { ...(managedConfig.channels as Record<string, unknown> || {}), telegram: { enabled: false } };
     }
+    // When disabled, omit the channel key entirely so OpenClaw won't load the plugin.
 
     // Sync Discord OpenClaw channel config
     const dcConfig = this.getDiscordOpenClawConfig?.();
@@ -321,8 +332,6 @@ export class OpenClawConfigSync {
         discordChannel.proxy = dcConfig.proxy;
       }
       managedConfig.channels = { ...(managedConfig.channels as Record<string, unknown> || {}), discord: discordChannel };
-    } else if (dcConfig) {
-      managedConfig.channels = { ...(managedConfig.channels as Record<string, unknown> || {}), discord: { enabled: false } };
     }
 
     // Sync Feishu OpenClaw channel config (via feishu-openclaw-plugin)
@@ -352,8 +361,6 @@ export class OpenClawConfigSync {
         mediaMaxMb: feishuConfig.mediaMaxMb || 30,
       };
       managedConfig.channels = { ...(managedConfig.channels as Record<string, unknown> || {}), feishu: feishuChannel };
-    } else if (feishuConfig) {
-      managedConfig.channels = { ...(managedConfig.channels as Record<string, unknown> || {}), feishu: { enabled: false } };
     }
 
     // Sync DingTalk OpenClaw channel config (via dingtalk-connector plugin)
@@ -374,8 +381,6 @@ export class OpenClawConfigSync {
         ...(gatewayToken ? { gatewayToken } : {}),
       };
       managedConfig.channels = { ...(managedConfig.channels as Record<string, unknown> || {}), 'dingtalk-connector': dingtalkChannel };
-    } else if (dingTalkConfig) {
-      managedConfig.channels = { ...(managedConfig.channels as Record<string, unknown> || {}), 'dingtalk-connector': { enabled: false } };
     }
 
     // Sync QQ OpenClaw channel config (via qqbot plugin)
@@ -403,8 +408,6 @@ export class OpenClawConfigSync {
         qqChannel.imageServerBaseUrl = qqConfig.imageServerBaseUrl;
       }
       managedConfig.channels = { ...(managedConfig.channels as Record<string, unknown> || {}), qqbot: qqChannel };
-    } else if (qqConfig) {
-      managedConfig.channels = { ...(managedConfig.channels as Record<string, unknown> || {}), qqbot: { enabled: false } };
     }
 
     // Sync WeCom OpenClaw channel config (via wecom-openclaw-plugin)
@@ -428,8 +431,6 @@ export class OpenClawConfigSync {
         sendThinkingMessage: wecomConfig.sendThinkingMessage ?? true,
       };
       managedConfig.channels = { ...(managedConfig.channels as Record<string, unknown> || {}), wecom: wecomChannel };
-    } else if (wecomConfig) {
-      managedConfig.channels = { ...(managedConfig.channels as Record<string, unknown> || {}), wecom: { enabled: false } };
     }
 
     const nextContent = `${JSON.stringify(managedConfig, null, 2)}\n`;

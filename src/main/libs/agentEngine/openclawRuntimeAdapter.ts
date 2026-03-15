@@ -522,6 +522,8 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
   private gatewayClientVersion: string | null = null;
   private gatewayClientEntryPath: string | null = null;
   private gatewayReadyPromise: Promise<void> | null = null;
+  /** Serializes concurrent calls to ensureGatewayClientReady to prevent duplicate clients. */
+  private gatewayClientInitLock: Promise<void> | null = null;
   private channelSessionSync: OpenClawChannelSessionSync | null = null;
   private readonly knownChannelSessionIds = new Set<string>();
   private readonly fullySyncedSessions = new Set<string>();
@@ -1072,6 +1074,20 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
   }
 
   private async ensureGatewayClientReady(): Promise<void> {
+    // Serialize concurrent calls: if another init is already in progress, wait for it.
+    if (this.gatewayClientInitLock) {
+      await this.gatewayClientInitLock;
+      return;
+    }
+    this.gatewayClientInitLock = this._ensureGatewayClientReadyImpl();
+    try {
+      await this.gatewayClientInitLock;
+    } finally {
+      this.gatewayClientInitLock = null;
+    }
+  }
+
+  private async _ensureGatewayClientReadyImpl(): Promise<void> {
     console.log('[ChannelSync] ensureGatewayClientReady: starting engine gateway...');
     const engineStatus = await this.engineManager.startGateway();
     console.log('[ChannelSync] ensureGatewayClientReady: engine phase=', engineStatus.phase, 'message=', engineStatus.message);
@@ -2273,12 +2289,103 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
       return;
     }
 
-    // Safety: if gateway returns fewer entries than cursor (session truncated/rebuilt),
-    // fall back to text-based position matching as one-time recovery.
+    // Determine firstNewIdx: where in historyEntries new (unsynced) messages start.
+    // Use RAW message count (historyMessages.length) to detect sliding window, NOT the
+    // filtered historyEntries count or cursor. When the gateway returns FINAL_HISTORY_SYNC_LIMIT
+    // raw messages, the window is at capacity and sliding — even if filtered entries are fewer
+    // due to toolCall/toolResult entries being stripped (e.g. raw=50, filtered=48, cursor=48).
     let firstNewIdx: number;
-    if (historyEntries.length < cursor) {
+    if (historyMessages.length >= FINAL_HISTORY_SYNC_LIMIT) {
+      // Sliding window: gateway returned a full window, position-based cursor is unreliable.
+      // Find the continuation point by matching the last local message in history.
+      console.log('[Debug:syncChannelUserMessages] history at capacity (raw:', historyMessages.length, ', filtered:', historyEntries.length, ', cursor:', cursor, '), using content matching');
+      const localEntries: MsgEntry[] = [];
+      if (session) {
+        for (const msg of session.messages) {
+          if (msg.type === 'user' || msg.type === 'assistant') {
+            localEntries.push({ role: msg.type, text: msg.content.trim() });
+          }
+        }
+      }
+
+      if (localEntries.length > 0) {
+        const lastLocal = localEntries[localEntries.length - 1];
+        let matchPos = -1;
+        for (let i = historyEntries.length - 1; i >= 0; i--) {
+          if (historyEntries[i].role === lastLocal.role
+              && historyEntries[i].text === lastLocal.text) {
+            // Double-check: verify the preceding entry also matches to avoid
+            // false positives from repeated identical messages (e.g. "再来一个").
+            if (localEntries.length >= 2 && i > 0) {
+              const secondLastLocal = localEntries[localEntries.length - 2];
+              if (historyEntries[i - 1].role === secondLastLocal.role
+                  && historyEntries[i - 1].text === secondLastLocal.text) {
+                matchPos = i;
+                break;
+              }
+              // Preceding entry didn't match — might be a duplicate, keep searching.
+              continue;
+            }
+            matchPos = i;
+            break;
+          }
+        }
+
+        // Fallback: if the last local entry is an assistant message and matching failed,
+        // the stored text may be a segment (from resolveAssistantSegmentText) that differs
+        // from the full text in gateway history. Retry with the last USER message instead,
+        // which is always stored verbatim and matches gateway history exactly.
+        if (matchPos < 0 && lastLocal.role === 'assistant') {
+          let lastLocalUserIdx = -1;
+          for (let j = localEntries.length - 1; j >= 0; j--) {
+            if (localEntries[j].role === 'user') {
+              lastLocalUserIdx = j;
+              break;
+            }
+          }
+          if (lastLocalUserIdx >= 0) {
+            const lastLocalUser = localEntries[lastLocalUserIdx];
+            // Find preceding user message in local for double-verification
+            let prevLocalUserText: string | undefined;
+            for (let j = lastLocalUserIdx - 1; j >= 0; j--) {
+              if (localEntries[j].role === 'user') {
+                prevLocalUserText = localEntries[j].text;
+                break;
+              }
+            }
+            console.log('[Debug:syncChannelUserMessages] assistant match failed, retrying with last user entry');
+            for (let i = historyEntries.length - 1; i >= 0; i--) {
+              if (historyEntries[i].role === 'user'
+                  && historyEntries[i].text === lastLocalUser.text) {
+                // Double-check: verify the preceding user message also matches
+                if (prevLocalUserText !== undefined && i > 0) {
+                  let prevHistUserText: string | undefined;
+                  for (let k = i - 1; k >= 0; k--) {
+                    if (historyEntries[k].role === 'user') {
+                      prevHistUserText = historyEntries[k].text;
+                      break;
+                    }
+                  }
+                  if (prevHistUserText !== prevLocalUserText) {
+                    continue; // Double-check failed, keep searching
+                  }
+                }
+                matchPos = i;
+                break;
+              }
+            }
+          }
+        }
+
+        firstNewIdx = matchPos >= 0 ? matchPos + 1 : historyEntries.length;
+        console.log('[Debug:syncChannelUserMessages] content match result: matchPos:', matchPos, 'firstNewIdx:', firstNewIdx);
+      } else {
+        firstNewIdx = 0; // No local messages, sync everything
+      }
+    } else if (historyEntries.length < cursor) {
+      // Safety: gateway returned fewer entries than cursor (session truncated/rebuilt).
+      // Only reached when raw history < FINAL_HISTORY_SYNC_LIMIT (not a sliding window).
       console.warn('[Debug:syncChannelUserMessages] history shrank (cursor:', cursor, 'entries:', historyEntries.length, '), falling back to text matching');
-      // Build ordered list of existing local messages for fallback matching
       const localEntries: MsgEntry[] = [];
       if (session) {
         for (const msg of session.messages) {
@@ -2380,15 +2487,100 @@ export class OpenClawRuntimeAdapter extends EventEmitter implements CoworkRuntim
         }
       }
 
-      // Position-based matching: find where local messages end in the history sequence
-      let localIdx = 0;
+      // Find where local messages end in the history to determine firstNewIdx.
+      // Primary strategy: reverse matching from the end of both arrays.
+      // This handles the sliding window case where oldest local messages may no
+      // longer appear in history (e.g. local has [m1..m50], history has [m3..m52]).
       let firstNewIdx = 0;
-      for (let i = 0; i < historyEntries.length; i++) {
-        if (localIdx < localEntries.length
-          && historyEntries[i].role === localEntries[localIdx].role
-          && historyEntries[i].text === localEntries[localIdx].text) {
-          localIdx++;
-          firstNewIdx = i + 1;
+      if (localEntries.length > 0) {
+        const lastLocal = localEntries[localEntries.length - 1];
+        let matchPos = -1;
+        for (let i = historyEntries.length - 1; i >= 0; i--) {
+          if (historyEntries[i].role === lastLocal.role
+              && historyEntries[i].text === lastLocal.text) {
+            if (localEntries.length >= 2 && i > 0) {
+              const secondLastLocal = localEntries[localEntries.length - 2];
+              if (historyEntries[i - 1].role === secondLastLocal.role
+                  && historyEntries[i - 1].text === secondLastLocal.text) {
+                matchPos = i;
+                break;
+              }
+              continue;
+            }
+            matchPos = i;
+            break;
+          }
+        }
+
+        // Fallback: if the last local entry is an assistant message and matching failed,
+        // the stored text may be a segment (from resolveAssistantSegmentText) that differs
+        // from the full text in gateway history. Retry with the last USER message instead.
+        let usedUserFallback = false;
+        if (matchPos < 0 && lastLocal.role === 'assistant') {
+          let lastLocalUserIdx = -1;
+          for (let j = localEntries.length - 1; j >= 0; j--) {
+            if (localEntries[j].role === 'user') {
+              lastLocalUserIdx = j;
+              break;
+            }
+          }
+          if (lastLocalUserIdx >= 0) {
+            const lastLocalUser = localEntries[lastLocalUserIdx];
+            // Find preceding user message in local for double-verification
+            let prevLocalUserText: string | undefined;
+            for (let j = lastLocalUserIdx - 1; j >= 0; j--) {
+              if (localEntries[j].role === 'user') {
+                prevLocalUserText = localEntries[j].text;
+                break;
+              }
+            }
+            console.log('[ChannelSync] syncFullChannelHistory: assistant match failed, retrying with last user entry');
+            for (let i = historyEntries.length - 1; i >= 0; i--) {
+              if (historyEntries[i].role === 'user'
+                  && historyEntries[i].text === lastLocalUser.text) {
+                // Double-check: verify the preceding user message also matches
+                if (prevLocalUserText !== undefined && i > 0) {
+                  let prevHistUserText: string | undefined;
+                  for (let k = i - 1; k >= 0; k--) {
+                    if (historyEntries[k].role === 'user') {
+                      prevHistUserText = historyEntries[k].text;
+                      break;
+                    }
+                  }
+                  if (prevHistUserText !== prevLocalUserText) {
+                    continue; // Double-check failed, keep searching
+                  }
+                }
+                matchPos = i;
+                usedUserFallback = true;
+                break;
+              }
+            }
+          }
+        }
+
+        if (matchPos >= 0) {
+          firstNewIdx = matchPos + 1;
+          // When user-message fallback was used, the assistant replies immediately following
+          // the matched user message are already in local (as segments). Skip them to prevent
+          // duplicate assistant messages.
+          if (usedUserFallback) {
+            while (firstNewIdx < historyEntries.length && historyEntries[firstNewIdx].role === 'assistant') {
+              firstNewIdx++;
+            }
+          }
+        } else {
+          // Reverse match failed — fall back to forward sequential matching.
+          // This covers the case where local is a strict prefix of history.
+          let localIdx = 0;
+          for (let i = 0; i < historyEntries.length; i++) {
+            if (localIdx < localEntries.length
+              && historyEntries[i].role === localEntries[localIdx].role
+              && historyEntries[i].text === localEntries[localIdx].text) {
+              localIdx++;
+              firstNewIdx = i + 1;
+            }
+          }
         }
       }
 
