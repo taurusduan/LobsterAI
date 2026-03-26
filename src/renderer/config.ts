@@ -354,6 +354,18 @@ export const defaultConfig: AppConfig = {
         { id: 'mimo-v2-flash', name: 'MiMo V2 Flash', supportsImage: false }
       ]
     },
+    qianfan: {
+      enabled: false,
+      apiKey: '',
+      baseUrl: 'https://qianfan.baidubce.com/v2',
+      apiFormat: 'openai',
+      models: [
+        { id: 'deepseek-v3.2', name: 'DeepSeek V3.2', supportsImage: false },
+        { id: 'deepseek-r1', name: 'DeepSeek R1', supportsImage: false },
+        { id: 'ernie-4.5-8k', name: 'ERNIE 4.5 8K', supportsImage: false },
+        { id: 'ernie-4.5-turbo-8k', name: 'ERNIE 4.5 Turbo', supportsImage: false },
+      ]
+    },
     stepfun: {
       enabled: false,
       apiKey: '',
@@ -431,7 +443,7 @@ export const CONFIG_KEYS = {
 };
 
 // 模型提供商分类
-export const CHINA_PROVIDERS = ['deepseek', 'moonshot', 'qwen', 'zhipu', 'minimax', 'volcengine', 'youdaozhiyun', 'stepfun', 'xiaomi', 'ollama', 'custom'] as const;
+export const CHINA_PROVIDERS = ['deepseek', 'moonshot', 'qwen', 'zhipu', 'minimax', 'volcengine', 'qianfan', 'youdaozhiyun', 'stepfun', 'xiaomi', 'ollama', 'custom'] as const;
 export const GLOBAL_PROVIDERS = ['openai', 'gemini', 'anthropic', 'openrouter'] as const;
 export const EN_PRIORITY_PROVIDERS = ['openai', 'anthropic', 'gemini'] as const;
 

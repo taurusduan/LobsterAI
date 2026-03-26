@@ -18,7 +18,7 @@ export interface ApiConfig {
   apiKey: string;
   baseUrl: string;
   provider?: string;
-  apiFormat?: 'anthropic' | 'openai';
+  apiFormat?: 'anthropic' | 'openai';       
 }
 
 export class ApiError extends Error {

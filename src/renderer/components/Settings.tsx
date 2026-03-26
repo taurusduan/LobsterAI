@@ -42,6 +42,7 @@ import {
   XiaomiIcon,
   StepfunIcon,
   VolcengineIcon,
+  QianfanIcon,
   OpenRouterIcon,
   OllamaIcon,
   CustomProviderIcon,
@@ -70,6 +71,7 @@ const providerKeys = [
   'volcengine',
   'qwen',
   'youdaozhiyun',
+  'qianfan',
   'stepfun',
   'xiaomi',
   'openrouter',
@@ -141,6 +143,7 @@ const providerMeta: Record<ProviderType, { label: string; icon: React.ReactNode 
   youdaozhiyun: { label: 'Youdao', icon: <YouDaoZhiYunIcon /> },
   qwen: { label: 'Qwen', icon: <QwenIcon /> },
   xiaomi: { label: 'Xiaomi', icon: <XiaomiIcon /> },
+  qianfan: { label: 'Qianfan', icon: <QianfanIcon /> },
   stepfun: { label: 'StepFun', icon: <StepfunIcon /> },
   volcengine: { label: 'Volcengine', icon: <VolcengineIcon /> },
   openrouter: { label: 'OpenRouter', icon: <OpenRouterIcon /> },
@@ -273,7 +276,7 @@ const getFixedApiFormatForProvider = (provider: string): 'anthropic' | 'openai' 
   if (provider === 'openai' || provider === 'gemini' || provider === 'stepfun') {
     return 'openai';
   }
-  if (provider === 'youdaozhiyun') {
+  if (provider === 'youdaozhiyun' || provider === 'qianfan') {
     return 'openai';
   }
   if (provider === 'anthropic') {
