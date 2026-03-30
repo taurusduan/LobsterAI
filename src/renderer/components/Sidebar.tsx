@@ -377,11 +377,6 @@ const SidebarAgentList: React.FC<{
 
   const enabledAgents = agents.filter((a) => a.enabled);
 
-  // Hide section if only the default main agent exists
-  if (enabledAgents.length <= 1 && !enabledAgents.some((a) => a.source === 'preset')) {
-    return null;
-  }
-
   const handleSwitch = (agentId: string) => {
     if (agentId === currentAgentId) return;
     agentService.switchAgent(agentId);
