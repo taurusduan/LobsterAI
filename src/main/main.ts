@@ -1336,6 +1336,10 @@ const refreshMcpBridge = (): Promise<{ tools: number; error?: string }> => {
   })().then((result) => {
     broadcastMcpBridgeSync('mcp:bridge:syncDone', { tools: result.tools, error: result.error });
     return result;
+  }).catch((err) => {
+    const error = err instanceof Error ? err.message : String(err);
+    broadcastMcpBridgeSync('mcp:bridge:syncDone', { tools: 0, error });
+    return { tools: 0, error };
   }).finally(() => {
     mcpBridgeRefreshPromise = null;
   });

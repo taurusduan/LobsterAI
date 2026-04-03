@@ -260,11 +260,20 @@ const McpManager: React.FC = () => {
    * Main process broadcasts syncStart/syncDone after server config changes.
    */
   useEffect(() => {
+    let syncTimeout: ReturnType<typeof setTimeout> | null = null;
+
     const cleanupStart = mcpService.onBridgeSyncStart(() => {
       setBridgeSyncing(true);
       setBridgeSyncResult(null);
+      // Fallback: auto-clear overlay after 40s to prevent permanent lock
+      if (syncTimeout) clearTimeout(syncTimeout);
+      syncTimeout = setTimeout(() => {
+        setBridgeSyncing(false);
+        setBridgeSyncResult({ tools: 0, error: i18nService.t('mcpBridgeSyncError') || 'Sync timed out' });
+      }, 40_000);
     });
     const cleanupDone = mcpService.onBridgeSyncDone((data) => {
+      if (syncTimeout) { clearTimeout(syncTimeout); syncTimeout = null; }
       setBridgeSyncing(false);
       setBridgeSyncResult({ tools: data.tools, error: data.error });
       if (!data.error) {
@@ -274,6 +283,7 @@ const McpManager: React.FC = () => {
     return () => {
       cleanupStart();
       cleanupDone();
+      if (syncTimeout) clearTimeout(syncTimeout);
     };
   }, []);
 
