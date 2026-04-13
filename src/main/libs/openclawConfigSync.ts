@@ -879,11 +879,13 @@ export class OpenClawConfigSync {
     const hasMcpBridgePlugin = isBundledPluginAvailable('mcp-bridge');
     const hasAskUserPlugin = isBundledPluginAvailable('ask-user-question');
 
-    // Read existing config to preserve gateway fields that OpenClaw runtime
-    // seeds at startup (auth, tailscale, controlUi).  Without this, every
-    // configSync cycle removes them, the gateway detects the diff, and
-    // restarts — creating a restart loop.
-    // See: openclaw/openclaw#58678, #33310
+    // Read existing config to preserve fields that the OpenClaw runtime
+    // auto-injects at startup.  Without this, every configSync cycle removes
+    // them, the gateway detects the diff, and restarts — creating a restart
+    // loop.  We preserve ALL existing gateway fields and plugin entries rather
+    // than whitelisting specific ones, so new auto-injected fields in future
+    // OpenClaw versions don't cause regressions.
+    // See: openclaw/openclaw#58678, #33310, #61613
     let existingGateway: Record<string, unknown> = {};
     let existingPlugins: Record<string, unknown> = {};
     try {
@@ -897,13 +899,6 @@ export class OpenClawConfigSync {
     console.log('[GW-RESTART-DIAG] existingGateway keys:', Object.keys(existingGateway).sort().join(',') || '(empty)');
     console.log('[GW-RESTART-DIAG] existingPlugins keys:', Object.keys(existingPlugins).sort().join(',') || '(empty)');
     console.log('[GW-RESTART-DIAG] existingPluginEntries keys:', Object.keys(existingPluginEntries).sort().join(',') || '(empty)');
-
-    // Detect if any provider uses Qwen/Aliyun DashScope URLs — OpenClaw auto-injects
-    // qwen-portal-auth plugin for these, so we must declare it to prevent config diff loops.
-    const hasQwenProvider = Object.values(allProvidersMap).some((p) => {
-      const url = (p as { baseUrl?: string }).baseUrl || '';
-      return url.includes('dashscope.aliyuncs.com') || url.includes('aliyuncs.com/compatible-mode');
-    });
 
     const dingTalkInstances = this.getDingTalkInstances();
     // DingTalk runs through OpenClaw plugin but still needs the gateway HTTP endpoint (chatCompletions)
@@ -935,13 +930,18 @@ export class OpenClawConfigSync {
 
     const managedConfig: Record<string, unknown> = {
       gateway: {
-        // Preserve gateway fields that the runtime seeds at startup (auth,
-        // tailscale, controlUi).  Without this they get removed on every sync
-        // cycle, causing a config diff → gateway restart loop.
-        ...(existingGateway.auth ? { auth: existingGateway.auth } : {}),
-        ...(existingGateway.tailscale ? { tailscale: existingGateway.tailscale } : {}),
-        ...(existingGateway.controlUi ? { controlUi: existingGateway.controlUi } : {}),
+        // Preserve ALL existing gateway fields so runtime-seeded values
+        // survive config rewrites.  Our managed fields below override
+        // any stale values.
+        ...existingGateway,
         mode: 'local',
+        // Explicitly declare auth and tailscale to match the runtime
+        // in-memory state.  The gateway sets auth.mode='token' when
+        // --token / OPENCLAW_GATEWAY_TOKEN is provided.  Without
+        // matching values here, ANY file change triggers
+        // "config change requires gateway restart (gateway.auth.token)".
+        auth: { mode: 'token', token: '${OPENCLAW_GATEWAY_TOKEN}' },
+        tailscale: { mode: 'off' },
         ...(hasAnyChannel ? {
           http: {
             endpoints: {
@@ -1001,6 +1001,10 @@ export class OpenClawConfigSync {
       },
       ...((() => {
         const pluginEntries: Record<string, unknown> = {
+          // Preserve ALL existing plugin entries so runtime auto-injected
+          // plugins (moonshot, minimax, volcengine, browser, etc.) survive
+          // config rewrites.  Our managed entries below override stale values.
+          ...existingPluginEntries,
           ...Object.fromEntries(
             preinstalledPluginIds.map((id) => {
               // Sync plugin enabled state with the corresponding channel config.
@@ -1032,18 +1036,6 @@ export class OpenClawConfigSync {
           ...(hasAskUserPlugin
             ? { 'ask-user-question': { enabled: true } }
             : {}),
-          // OpenClaw auto-injects qwen-portal-auth for Qwen/DashScope URLs; declare it
-          // explicitly so configSync doesn't remove it and trigger restart loops.
-          ...(hasQwenProvider
-            ? { 'qwen-portal-auth': { enabled: true } }
-            : {}),
-          // OpenClaw v2026.4.1+ auto-injects minimax, volcengine, and browser
-          // plugin entries at startup.  Declare them explicitly so configSync
-          // doesn't remove them and trigger restart loops.
-          // See: openclaw/openclaw#61613
-          'minimax': { enabled: true },
-          'volcengine': { enabled: true },
-          'browser': { enabled: true },
           // Disable acpx (ACP agent runtime) — LobsterAI does not use ACP and
           // the embedded probe adds ~11s to gateway startup while it waits for
           // a process that always fails.  See openclaw/openclaw#62588.
@@ -1053,6 +1045,10 @@ export class OpenClawConfigSync {
         return Object.keys(pluginEntries).length > 0
           ? {
               plugins: {
+                // Preserve existing plugins fields (load, deny, etc.) so
+                // runtime-seeded values survive config rewrites and don't
+                // cause a plugins diff → gateway restart.
+                ...existingPlugins,
                 // Third-party plugins live in a separate `extensions/` dir (not
                 // `dist/extensions/`) and need `load.paths` so the gateway discovers
                 // them with origin="config", bypassing the bundled-channel-entry
