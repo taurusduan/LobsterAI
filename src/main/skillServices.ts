@@ -313,11 +313,15 @@ export class SkillServiceManager {
 
       await this.startWebSearchServiceProcess(skillPath);
 
-      // Wait a moment for the server to start
-      await new Promise(resolve => setTimeout(resolve, 3000));
-
-      // Check if server started successfully
+      // Poll for pid file instead of a fixed 3 s sleep — typically resolves
+      // in < 1 s, saving 2-3 s off the startup path.
       const pidFile = path.join(skillPath, '.server.pid');
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        if (fs.existsSync(pidFile)) break;
+        await new Promise(r => setTimeout(r, 200));
+      }
+
       if (fs.existsSync(pidFile)) {
         const pid = parseInt(fs.readFileSync(pidFile, 'utf-8').trim());
         this.webSearchPid = pid;
