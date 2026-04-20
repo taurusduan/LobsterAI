@@ -42,9 +42,9 @@
   ; lacks our customUnInit and would show an undismissable dialog).
   ;
   ; Strategy: rename $INSTDIR to a temp name (instant, even for thousands of
-  ; files), then delete the renamed directory asynchronously via cmd /c so
-  ; the installer UI appears immediately instead of blocking on recursive
-  ; deletion of cfmind/SKILLs/node_modules (3000+ files).
+  ; files). The actual deletion is deferred to customInstall so that
+  ; user-created skills in $INSTDIR.old\resources\SKILLs can be copied back
+  ; into the new install before the old directory is removed.
   ; If rename fails (ghost file handles), skip — the installer's built-in
   ; uninstall step will handle the old directory.
   IfFileExists "$INSTDIR\*.*" 0 SkipOldDirRemoval
@@ -52,7 +52,8 @@
     IfErrors 0 RenameOK
       Goto SkipOldDirRemoval
     RenameOK:
-      nsExec::Exec 'cmd /c rd /s /q "$INSTDIR.old"'
+      ; Deletion is deferred to customInstall, after user-created skills are
+      ; copied back from $INSTDIR.old to the new $INSTDIR.
   SkipOldDirRemoval:
 !macroend
 
@@ -91,6 +92,45 @@
   ${GetTime} "" "L" $3 $4 $5 $6 $7 $8 $9
   FileWrite $2 "tar-extract-done: $5-$4-$3 $6:$7:$8 exit=$0$\r$\n"
   Delete "$INSTDIR\resources\win-resources.tar"
+
+  ; ── Restore user-created skills from old install dir ──
+  ; Read skills.config.json from the old install to identify bundled skill IDs.
+  ; Skills in $INSTDIR.old that are NOT listed in skills.config.json defaults
+  ; are user-created and copied back into the new install.
+  ; Falls back to "copy anything not already in the new dir" if the config is absent.
+  ; This runs synchronously so the app never launches before skills are ready.
+  IfFileExists "$INSTDIR.old\resources\SKILLs\*.*" 0 SkipSkillRestore
+    ${GetTime} "" "L" $3 $4 $5 $6 $7 $8 $9
+    FileWrite $2 "skill-restore-start: $5-$4-$3 $6:$7:$8$\r$\n"
+
+    nsExec::ExecToLog 'powershell -NoProfile -NonInteractive -Command "\
+      $$oldSkills = [IO.Path]::Combine($\"$INSTDIR.old$\", $\"resources$\", $\"SKILLs$\");\
+      $$newSkills = [IO.Path]::Combine($\"$INSTDIR$\",     $\"resources$\", $\"SKILLs$\");\
+      $$config    = [IO.Path]::Combine($$oldSkills, $\"skills.config.json$\");\
+      $$bundled   = @(try {\
+        if (Test-Path $$config) {\
+          (Get-Content $$config -Raw | ConvertFrom-Json).defaults.PSObject.Properties.Name\
+        }\
+      } catch { });\
+      Get-ChildItem -Path $$oldSkills -Directory | ForEach-Object {\
+        if ($$bundled -notcontains $$_.Name) {\
+          $$target = [IO.Path]::Combine($$newSkills, $$_.Name);\
+          if (-not (Test-Path $$target)) {\
+            Copy-Item -Path $$_.FullName -Destination $$target -Recurse -Force\
+              -ErrorAction SilentlyContinue\
+          }\
+        }\
+      }"'
+    Pop $0
+
+    ${GetTime} "" "L" $3 $4 $5 $6 $7 $8 $9
+    FileWrite $2 "skill-restore-done: $5-$4-$3 $6:$7:$8 exit=$0$\r$\n"
+  SkipSkillRestore:
+
+  ; ── Delete the old install directory now that user skills are restored ──
+  IfFileExists "$INSTDIR.old\*.*" 0 SkipOldDirCleanup
+    nsExec::Exec 'cmd /c rd /s /q "$INSTDIR.old"'
+  SkipOldDirCleanup:
 
   System::Call 'Kernel32::SetEnvironmentVariable(t "ELECTRON_RUN_AS_NODE", t "")i'
 
